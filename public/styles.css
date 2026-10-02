@@ -224,6 +224,20 @@ body {
   margin-left: 8px;
   vertical-align: middle;
 }
+.follow-toggle {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.follow-toggle.is-on {
+  color: var(--primary-dark);
+  border-color: var(--adopt-border);
+  background: var(--adopt-bg);
+  font-weight: 700;
+}
+.notif-summary { margin-bottom: 10px; font-size: 12px; }
+.notif-card.is-read { opacity: 0.62; }
+.notif-body { margin: 4px 0; font-size: 14px; }
+.notif-card .card-actions { margin-top: 6px; display: flex; gap: 8px; align-items: center; }
 .src-legend {
   display: flex;
   gap: 8px;

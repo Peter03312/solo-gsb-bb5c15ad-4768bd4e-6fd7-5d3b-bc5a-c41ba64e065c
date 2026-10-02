@@ -159,6 +159,30 @@ function initSchema(db) {
     seg INTEGER PRIMARY KEY
   );
 
+  -- 段号关注：登录用户按段号关注；关注只影响之后的发布（历史发布不补通知）。
+  -- 取消关注只删本表行，既有通知一律保留。
+  CREATE TABLE IF NOT EXISTS segment_follows (
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    seg         INTEGER NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, seg)
+  );
+
+  -- 关注通知：发布成功时，若关注段“上一已发布版本 → 新版本”正文存在净变化则生成一条；
+  -- 同版同段每人至多一条（UNIQUE），合版后正文未变（即便发布了提议）不生成。
+  -- 通知为追加记录，从不删除：取消关注不删除；保密段对参与者的屏蔽只在视图层按 segment_secrets 过滤。
+  CREATE TABLE IF NOT EXISTS segment_notifications (
+    id          INTEGER PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    seg         INTEGER NOT NULL,
+    from_version_id INTEGER NOT NULL REFERENCES versions(id),
+    to_version_id   INTEGER NOT NULL REFERENCES versions(id),
+    is_read     INTEGER NOT NULL DEFAULT 0,  -- 0 未读 | 1 已读；重复标记不改变结果
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),  -- 即发布时间；列表按其倒序
+    UNIQUE (user_id, to_version_id, seg)
+  );
+  CREATE INDEX IF NOT EXISTS idx_notifications_user ON segment_notifications(user_id, id);
+
   -- 提议依据附件：记录员为本人“待复核(pending)”提议上传；文件名仅展示，落盘名随机。
   -- 提议离开 pending（采纳/驳回/标记冲突/发布）后集合冻结：只可下载，不再增删；
   -- 记录随提议与历史决议永久保留；续提生成的新提议不继承旧附件。

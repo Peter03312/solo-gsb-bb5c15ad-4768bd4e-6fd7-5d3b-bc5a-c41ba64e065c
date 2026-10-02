@@ -329,6 +329,7 @@ function render() {
   renderTabs();
   renderProposals();
   renderObjections();
+  renderNotifications();
   renderVersions();
 }
 
@@ -374,6 +375,7 @@ function renderPaper() {
       ph.className = 'secret-placeholder';
       ph.textContent = '🔒 ' + seg.text;
       body.appendChild(ph);
+      body.appendChild(followButton(seg.seg));
     } else {
       const segMarks = viewMode === 'preview' ? buildPreviewMarks(seg.seg) : collectSegMarks(seg.seg);
       renderMarkedText(body, seg.text, segMarks);
@@ -402,6 +404,7 @@ function renderPaper() {
         srcBtn.addEventListener('click', () => openProvenance(booth.currentVersion.id, seg.seg));
         body.appendChild(srcBtn);
       }
+      body.appendChild(followButton(seg.seg));
     }
     row.appendChild(no);
     row.appendChild(body);
@@ -424,6 +427,34 @@ async function toggleSecret(seg) {
     const r = await api(`/api/segments/${seg}/${secret ? 'secret' : 'unsecret'}`, { method: 'POST' });
     await reload();
     toast(`第 ${seg} 段已${secret ? '设为保密' : '解除保密'}（留痕 #${r.logId}：${r.previousState} → ${r.newState}）`, 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+// ---------- 段号关注 ----------
+function isFollowing(seg) {
+  return !!(booth && booth.followedSegs && booth.followedSegs.includes(seg));
+}
+
+// 关注只影响之后的发布：按钮挂在每段段尾（保密占位段同样可关注）
+function followButton(seg) {
+  const b = document.createElement('button');
+  const on = isFollowing(seg);
+  b.className = 'btn tiny follow-toggle' + (on ? ' is-on' : '');
+  b.textContent = on ? '★ 已关注' : '☆ 关注';
+  b.title = on
+    ? '取消关注：不再接收该段之后发布的正文变化通知（既有通知保留）'
+    : '关注后：该段在之后某次发布中正文发生净变化时，收到含段号与两端版本号的站内通知';
+  b.addEventListener('mousedown', (e) => e.preventDefault());
+  b.addEventListener('click', () => toggleFollow(seg));
+  return b;
+}
+
+async function toggleFollow(seg) {
+  const follow = !isFollowing(seg);
+  try {
+    await api(`/api/segments/${seg}/${follow ? 'follow' : 'unfollow'}`, { method: 'POST' });
+    await reload();
+    toast(`已${follow ? '关注' : '取消关注'}第 ${seg} 段${follow ? '；之后该段正文随发布发生净变化时将通知你' : '；既有通知保留'}`, 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
 
@@ -854,6 +885,7 @@ function renderTabs() {
   $$('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $('#panel-proposals').classList.toggle('hidden', tab !== 'proposals');
   $('#panel-objections').classList.toggle('hidden', tab !== 'objections');
+  $('#panel-notifications').classList.toggle('hidden', tab !== 'notifications');
   $('#panel-versions').classList.toggle('hidden', tab !== 'versions');
   if (booth && booth.initialized) {
     const pending = booth.proposals.filter((p) => p.status === 'pending' && p.base_ver === booth.currentVersion.id).length;
@@ -861,9 +893,12 @@ function renderTabs() {
     const respondPending = (booth.publishCheck && booth.publishCheck.items || []).filter((x) => !x.satisfied).length;
     setBadge('badge-proposals', pending);
     setBadge('badge-objections', relo + respondPending);
+    // 未读数已在服务端排除当前保密段（参与者保密段通知整体隐藏、不计未读）
+    setBadge('badge-notifications', booth.unreadCount || 0);
   } else {
     setBadge('badge-proposals', 0);
     setBadge('badge-objections', 0);
+    setBadge('badge-notifications', 0);
   }
 }
 function setBadge(id, n) {
@@ -987,6 +1022,51 @@ function renderObjections() {
   }).join('');
   $$('#panel-objections [data-respond]').forEach((b) =>
     b.addEventListener('click', () => openRespondForm(parseInt(b.dataset.respond, 10))));
+}
+
+// ---------- 侧栏：段号关注通知 ----------
+// 通知按发布时间倒序；逐条标为已读（幂等）。当前保密段对参与者整体隐藏（服务端不下发，故不渲染、不计未读）。
+function renderNotifications() {
+  const panel = $('#panel-notifications');
+  if (!booth || !booth.initialized) {
+    panel.innerHTML = '<div class="empty">尚无文档。</div>';
+    return;
+  }
+  const list = booth.notifications || [];
+  if (!list.length) {
+    panel.innerHTML = '<div class="empty">还没有关注通知。<br/>在正文每段段尾点击“☆ 关注”，该段之后随发布发生正文净变化时会在此提醒。</div>';
+    return;
+  }
+  panel.innerHTML = `
+    <div class="notif-summary muted">共 ${list.length} 条通知 · ${booth.unreadCount || 0} 条未读（按发布时间倒序）</div>
+    ${list.map((n) => `
+    <div class="card notif-card${n.read ? ' is-read' : ''}" data-notif="${n.id}">
+      <div class="card-head">
+        <span class="card-id">🔔 第 ${n.seg} 段正文已变化</span>
+        <span class="card-meta">${n.createdAt.replace(' ', ' · ')} UTC</span>
+      </div>
+      <div class="notif-body">
+        你关注的第 <b>${n.seg}</b> 段正文在发布 <b>v${n.fromVersionId} → v${n.toVersionId}</b> 时存在净变化。
+      </div>
+      <div class="card-meta">同版同段每人至多一条；只在合版后正文确有变化时通知，中途改动最终撤销、两端正文相同不通知。</div>
+      <div class="card-actions">
+        <button class="btn small" data-ver="${n.toVersionId}">查看 v${n.toVersionId}</button>
+        ${n.read
+          ? '<span class="tag tag-published">已读</span>'
+          : '<button class="btn small primary" data-notif-read="' + n.id + '">标为已读</button>'}
+      </div>
+    </div>`).join('')}`;
+  $$('#panel-notifications [data-notif-read]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      const id = parseInt(b.dataset.notifRead, 10);
+      try {
+        await api(`/api/notifications/${id}/read`, { method: 'POST' });
+        await reload();
+        toast(`通知 #${id} 已标为已读`, 'success');
+      } catch (err) { toast(err.message, 'error'); }
+    }));
+  $$('#panel-notifications [data-ver]').forEach((b) =>
+    b.addEventListener('click', () => openVersion(parseInt(b.dataset.ver, 10))));
 }
 
 // ---------- 侧栏：版本 ----------

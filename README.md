@@ -218,6 +218,23 @@ npm test
    - **解除保密后**参与者重新可见该段正文与相关记录；保密/解除均在数据库事务中执行，
      留痕**操作人、时间与前后状态**（`public → secret` / `secret → public`）。
    - 失败均明确拒绝且不改变状态：未知段号 → 404；重复保密/对未保密段解除 → 409；非复核员操作 → 403。
+10. **段号关注与正文变化站内通知（本轮新增，全部登录用户）**：
+    - 在正文**每段段尾**点击“☆ 关注 / ★ 已关注”（或调用 HTTP API）即可按段号关注或取消关注；
+      记录员、复核员、参与者均可关注，**保密段也可关注**。
+    - **关注只影响之后的发布**：关注时不补发历史发布通知；**取消关注不删除既有通知**，只是不再收到
+      之后的通知；取消后再次关注同样不补发错过的通知。
+    - **成功发布**时，若被关注段从**上一已发布版本到新版本的正文存在净变化**（两段不可变快照逐码点不同），
+      系统为每个关注者生成**一条站内通知**，内容含**段号与两端版本号**（vFrom → vTo）；
+      **同版同段每人至多一条**。**即使该段发布了提议，只要合版后正文未变（如替换文字与原文相同、
+      或中途改动最终撤销），就不通知**。通知在发布事务内生成，**发布失败（如异议回应门槛未过）整体回滚，
+      绝不留下通知**。
+    - 通知在右侧“**通知**”面板（或 `GET /api/notifications`）**按发布时间倒序**展示，标签上显示**未读数**；
+      可**逐条标为已读**，重复标记幂等（不改变结果、不新增不删除）。
+    - **与保密规则衔接**：参与者**当前保密段**的通知**整体隐藏**——不出现在列表中、段号/版本号不泄露、
+      **不计入未读数**；通知记录本身从不删除，**解除保密后自动恢复且保持其原已读状态**（隐藏期间读过与否
+      按原状态保留）。工作人员（记录员/复核员）按现有权限可看到全部通知，不受保密影响。
+    - **失败均明确拒绝**：无文档 409、无效段号 400、未知段号 404、重复关注/取消未关注段 409、
+      未登录 401、标读不存在的通知 404、**操作他人通知 403**。
 
 所有失败场景（无权操作、非法字符范围、重复发布、重复导入、重复采纳/重定位等）均返回明确的
 HTTP 状态码与中文原因，且在数据库事务中执行——失败即回滚，不改变任何状态。
@@ -258,6 +275,10 @@ HTTP 状态码与中文原因，且在数据库事务中执行——失败即回
 | `POST /api/proposals/:id/attachments` | 记录员（本人） | **上传依据文件**：请求体为文件原始字节（非 JSON），请求头 `X-Attachment-Filename`（原始文件名，UTF-8 百分号编码，仅展示）、`X-Attachment-SHA256`（64 位十六进制预期摘要）。仅对本人**待复核**提议；内容须可识别为 PDF/PNG/JPEG/MP3/WAV 且 ≤ 20 MB，实际摘要须与预期一致。201 返回附件元数据；提议不存在 404、非本人/非记录员 403、已冻结 409、空文件/缺头/类型不可识别 400、摘要不符 422、超限 413；失败不留半成品或孤儿文件 |
 | `DELETE /api/attachments/:aid` | 记录员（上传者本人） | **删除误传附件**（事务内复查最终状态）：仅待复核提议可删；非本人统一 404（不暴露存在性），冻结后 409；元数据与磁盘文件一并移除 |
 | `GET /api/attachments/:aid/download` | 记录员（本人上传）/复核员 | **下载依据文件**：`Content-Type` 按内容嗅探结果、`X-Attachment-SHA256` 为实际摘要、`Content-Disposition` 含 RFC 5987 中文原始文件名。复核员可下载全部，记录员仅限本人上传；**参与者及未授权者一律 404**（不获得内容或地址），未登录 401 |
+| `POST /api/segments/:seg/follow` | 登录用户 | **按段号关注**：关注只影响之后的发布（历史不补发）。无文档 409、非整数段号 400、未知段号 404、重复关注 409、未登录 401。201 返回 `{seg,following:true}` |
+| `POST /api/segments/:seg/unfollow` | 登录用户 | **取消关注**：只影响之后的发布，**不删除既有通知**。未知段号 404、当前未关注 409。返回 `{seg,following:false}` |
+| `GET /api/notifications` | 登录用户 | **本人站内通知**：按发布时间倒序返回 `{notifications:[{id,seg,fromVersionId,toVersionId,read,createdAt}], unreadCount}`。成功发布时仅对“上一已发布版本→新版本”正文有净变化的关注段每人生成一条（同版同段每人至多一条；合版后正文未变即使发布了提议也不生成；失败发布不留通知）。参与者**当前保密段**的通知整体隐藏且不计入 `unreadCount`，解除保密后恢复原已读状态；工作人员可见全部。`GET /api/booth` 同时下发 `followedSegs`、`notifications` 与 `unreadCount` |
+| `POST /api/notifications/:id/read` | 登录用户 | **逐条标为已读**（幂等：重复标记不改变结果）。通知不存在 404、**操作他人通知 403**、未登录 401。返回 `{id,read:true}` |
 
 ### 发布前异议回应调用示例（curl）
 
@@ -507,6 +528,57 @@ curl -s -b /tmp/rec.cookie -X DELETE http://localhost:3000/api/attachments/3
 > （浏览器自动计算 SHA-256）；音频可直接播放，图片可点“预览”，PDF/图片链接可新标签打开。
 > 附件冻结后上传与删除入口消失，仅保留下载与校验信息；历史版本只读视图的相关决议中同样列出冻结附件。
 
+### 段号关注与站内通知调用示例（curl）
+
+```bash
+# 1) 登录（三类登录用户均可关注；以下以参与者为例）
+curl -i -c /tmp/par.cookie -X POST http://localhost:3000/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"participant","password":"participant123"}'
+
+# 2) 关注第 2 段（保密段也可关注）；关注只影响之后的发布，不补发历史通知
+curl -s -b /tmp/par.cookie -X POST http://localhost:3000/api/segments/2/follow
+# 201 {"ok":true,"seg":2,"following":true}
+
+# 3) 取消关注（只影响之后发布；既有通知保留，不删除）
+curl -s -b /tmp/par.cookie -X POST http://localhost:3000/api/segments/2/unfollow
+# {"ok":true,"seg":2,"following":false}
+
+# 4) 复核员正常发布（POST /api/publish）后，关注者查询通知——按发布时间倒序
+#    仅当关注段正文 v2→v3 存在净变化时才出现一条；同版同段每人至多一条；
+#    即便发布了提议，只要合版后该段正文未变（如等文替换、中途改动最终撤销），就不出现。
+curl -s -b /tmp/par.cookie http://localhost:3000/api/notifications
+# {
+#   "notifications": [
+#     { "id": 7, "seg": 2, "fromVersionId": 2, "toVersionId": 3,
+#       "read": false, "createdAt": "2026-10-02 08:30:11" } ],
+#   "unreadCount": 1 }
+# GET /api/booth 的响应同时含 followedSegs（本人关注段号）、notifications 与 unreadCount。
+
+# 5) 逐条标为已读（幂等；重复标记返回相同结果，不新增不删除）
+curl -s -b /tmp/par.cookie -X POST http://localhost:3000/api/notifications/7/read
+# {"ok":true,"id":7,"read":true}
+
+# 6) 与保密规则衔接：第 2 段被复核员设为保密期间，参与者的通知列表整体隐藏该条
+#    （不返回段号/版本号，unreadCount 也不含它）；解除保密后自动恢复，且保持此前的已读状态。
+#    工作人员（记录员/复核员）始终能在自己的通知列表看到本人关注段的通知。
+
+# 7) 失败场景：均明确拒绝且不改变状态
+#    无文档时关注：409 {"error":"尚未导入逐字稿，无段号可关注","code":"NO_DOCUMENT"}
+#    段号非整数：  400 {"error":"缺少有效的段号 seg","code":"BAD_REQUEST"}
+#    未知段号：    404 {"error":"未知段号：当前版本 v3 中不存在第 999 段，无法关注","code":"NOT_FOUND"}
+#    重复关注：    409 {"error":"您已关注第 2 段，请勿重复关注","code":"ALREADY_FOLLOWING"}
+#    取消未关注段：409 {"error":"您当前未关注第 3 段，无需取消","code":"NOT_FOLLOWING"}
+#    标读他人通知：403 {"error":"无权操作：只能标读本人的站内通知（通知 #4 属于其他用户）","code":"FORBIDDEN"}
+#    标读不存在：  404 {"error":"通知 #99999 不存在","code":"NOT_FOUND"}
+#    未登录：      401 {"error":"未登录或会话已过期","code":"UNAUTHENTICATED"}
+#    发布失败（如异议回应门槛未过）：通知与版本同事务回滚，GET /api/notifications 中不会多出记录。
+```
+
+> 网页操作：在正文每段段尾点击“☆ 关注/★ 已关注”切换关注；右侧新增“通知”标签页，
+> 角标显示未读数，面板按发布时间倒序列出“第 N 段正文在 vFrom→vTo 发布时发生净变化”，
+> 每条可单独“标为已读”，也可直接打开对应新版本。参与者当前保密段的通知在该面板同样整体隐藏。
+
 ---
 
 ## 六、数据模型（SQLite）
@@ -537,6 +609,13 @@ curl -s -b /tmp/rec.cookie -X DELETE http://localhost:3000/api/attachments/3
   字节数、**预期摘要 `expected_sha256` 与实算摘要 `actual_sha256`**（两者相等才允许落库）、上传者与时间。
   附件冻结与否不额外建列——由所属 `proposals.status` 实时决定（仅 `pending` 可增删）；
   删除是硬删除（同时移除磁盘文件），保留的附件随提议与历史决议永久留存；续提只新建提议，不复制附件行。
+- `segment_follows`：**段号关注关系**。主键 `(user_id, seg)`，全部登录用户可按段号关注；关注只影响
+  之后的发布（无时间窗口字段，查询时与发布事件比对即可）。取消关注是硬删除本行，但**从不删除通知**。
+- `segment_notifications`：**段号关注的正文变化站内通知**。发布事务内对“上一已发布版本 → 新版本”正文
+  逐码点不同的关注段，按关注者逐行插入：`seg`、`from_version_id`、`to_version_id`、`is_read` 与发布时间
+  `created_at`；`UNIQUE(user_id, to_version_id, seg)` 保证**同版同段每人至多一条**，等文合版不插入。
+  通知只追加、不更新已读以外的字段、**从不删除**；参与者对当前保密段的屏蔽只在视图层按
+  `segment_secrets` 过滤（整体隐藏、不计未读），解除保密后原 `is_read` 状态自然恢复。
 
 ---
 
@@ -564,5 +643,6 @@ curl -s -b /tmp/rec.cookie -X DELETE http://localhost:3000/api/attachments/3
     ├── unit.test.js         # 文本算子、解析与附件类型嗅探的单元测试
     ├── e2e.test.js          # 临时库 + 真实 HTTP 的端到端测试
     ├── attachments.test.js  # 附件：校验/权限/冻结/删除/续提不继承/并发/无孤儿
-    └── attachments-restart.test.js # 附件：同一数据目录重启后的持久化与权限回归
+    ├── attachments-restart.test.js # 附件：同一数据目录重启后的持久化与权限回归
+    └── follows.test.js      # 段号关注与发布通知：净变化才通知/幂等已读/保密隐藏恢复/失败发布不留通知
 ```
