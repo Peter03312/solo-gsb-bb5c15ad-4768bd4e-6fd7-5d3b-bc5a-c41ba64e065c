@@ -162,6 +162,7 @@ async function onUploadFiles(input, afterChange) {
 
 let me = null;
 let booth = null;
+let notifs = null; // 本人段关注通知：{ notifications, unreadCount }
 let tab = 'proposals';
 let viewMode = 'base';
 let currentSelection = null; // { seg, start, end, excerpt }
@@ -298,6 +299,11 @@ async function reload() {
     toast(err.message, 'error');
     return;
   }
+  try {
+    notifs = await api('/api/notifications');
+  } catch (err) {
+    notifs = { notifications: [], unreadCount: 0 };
+  }
   render();
 }
 
@@ -329,6 +335,7 @@ function render() {
   renderTabs();
   renderProposals();
   renderObjections();
+  renderNotifications();
   renderVersions();
 }
 
@@ -374,6 +381,16 @@ function renderPaper() {
       ph.className = 'secret-placeholder';
       ph.textContent = '🔒 ' + seg.text;
       body.appendChild(ph);
+      // 保密段仍可按段号关注（关注只影响之后的发布；保密期间该段通知整体隐藏，解除保密后恢复）
+      if (viewMode === 'base') {
+        const followBtn = document.createElement('button');
+        followBtn.className = 'btn tiny follow-toggle' + (isFollowing(seg.seg) ? ' is-following' : '');
+        followBtn.textContent = isFollowing(seg.seg) ? '★ 已关注' : '☆ 关注';
+        followBtn.title = '关注只影响之后的成功发布；保密期间该段通知整体隐藏，解除保密后恢复';
+        followBtn.addEventListener('mousedown', (e) => e.preventDefault());
+        followBtn.addEventListener('click', () => toggleFollow(seg.seg));
+        body.appendChild(followBtn);
+      }
     } else {
       const segMarks = viewMode === 'preview' ? buildPreviewMarks(seg.seg) : collectSegMarks(seg.seg);
       renderMarkedText(body, seg.text, segMarks);
@@ -394,6 +411,16 @@ function renderPaper() {
       }
       // 已登录用户按段查看当前已发布版本的正文来源（预览为未发布内容，不提供来源）
       if (viewMode === 'base') {
+        // 段关注开关：任一登录用户可按段号关注/取消关注（保密段对参与者仍可关注，关注只影响之后的发布）
+        const followBtn = document.createElement('button');
+        followBtn.className = 'btn tiny follow-toggle' + (isFollowing(seg.seg) ? ' is-following' : '');
+        followBtn.textContent = isFollowing(seg.seg) ? '★ 已关注' : '☆ 关注';
+        followBtn.title = isFollowing(seg.seg)
+          ? '已关注该段：之后成功发布且该段正文有净变化时，将收到站内通知；取消关注不删除既有通知'
+          : '关注该段：之后成功发布且该段正文有净变化时，将收到站内通知（只影响之后的发布）';
+        followBtn.addEventListener('mousedown', (e) => e.preventDefault());
+        followBtn.addEventListener('click', () => toggleFollow(seg.seg));
+        body.appendChild(followBtn);
         const srcBtn = document.createElement('button');
         srcBtn.className = 'btn tiny src-toggle';
         srcBtn.textContent = '来源';
@@ -412,6 +439,20 @@ function renderPaper() {
 // 段号是否在当前保密集合中（工作人员视角的真实正文用）
 function isSecret(seg) {
   return !!(booth && booth.secretSegs && booth.secretSegs.includes(seg));
+}
+
+// 当前用户是否已关注某段
+function isFollowing(seg) {
+  return !!(booth && booth.followedSegs && booth.followedSegs.includes(seg));
+}
+
+async function toggleFollow(seg) {
+  const follow = !isFollowing(seg);
+  try {
+    await api(`/api/segments/${seg}/${follow ? 'follow' : 'unfollow'}`, { method: 'POST' });
+    await reload();
+    toast(`第 ${seg} 段已${follow ? '关注：之后该段因发布出现正文净变化时将通知你' : '取消关注（既有通知保留）'}`, 'success');
+  } catch (err) { toast(err.message, 'error'); await reload(); }
 }
 
 async function toggleSecret(seg) {
@@ -854,6 +895,7 @@ function renderTabs() {
   $$('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $('#panel-proposals').classList.toggle('hidden', tab !== 'proposals');
   $('#panel-objections').classList.toggle('hidden', tab !== 'objections');
+  $('#panel-notifications').classList.toggle('hidden', tab !== 'notifications');
   $('#panel-versions').classList.toggle('hidden', tab !== 'versions');
   if (booth && booth.initialized) {
     const pending = booth.proposals.filter((p) => p.status === 'pending' && p.base_ver === booth.currentVersion.id).length;
@@ -861,9 +903,11 @@ function renderTabs() {
     const respondPending = (booth.publishCheck && booth.publishCheck.items || []).filter((x) => !x.satisfied).length;
     setBadge('badge-proposals', pending);
     setBadge('badge-objections', relo + respondPending);
+    setBadge('badge-notifications', (notifs && notifs.unreadCount) || 0);
   } else {
     setBadge('badge-proposals', 0);
     setBadge('badge-objections', 0);
+    setBadge('badge-notifications', 0);
   }
 }
 function setBadge(id, n) {
@@ -987,6 +1031,65 @@ function renderObjections() {
   }).join('');
   $$('#panel-objections [data-respond]').forEach((b) =>
     b.addEventListener('click', () => openRespondForm(parseInt(b.dataset.respond, 10))));
+}
+
+// ---------- 侧栏：段关注通知 ----------
+function renderNotifications() {
+  const panel = $('#panel-notifications');
+  const list = (notifs && notifs.notifications) || [];
+  if (!booth || !booth.initialized) {
+    panel.innerHTML = '<div class="empty">尚无文档。</div>';
+    return;
+  }
+  const head = `<p class="card-meta notif-head">共 ${list.length} 条通知 · 未读 ${notifs.unreadCount || 0} 条。
+    关注段之后的成功发布若使该段正文有净变化，就会产生一条通知（同版同段每人至多一条）；
+    取消关注不删除既有通知；当前保密段的通知已整体隐藏，解除保密后恢复。</p>`;
+  if (!list.length) {
+    panel.innerHTML = head + '<div class="empty">还没有段关注通知。<br/>在左侧正文段尾点“☆ 关注”，关注段因后续发布出现正文净变化时会在此提醒你。</div>';
+    return;
+  }
+  panel.innerHTML = head + list.map((n) => `
+    <div class="card notif-card${n.read ? '' : ' is-unread'}" data-notif="${n.id}">
+      <div class="card-head">
+        <span class="card-id">第 ${n.seg} 段 · v${n.fromVersionId} → v${n.toVersionId}
+          ${n.read ? '' : '<span class="tag tag-needs_relocation">未读</span>'}</span>
+        <span class="card-meta">${n.createdAt} UTC${n.read && n.readAt ? ` · ${n.readAt} 已读` : ''}</span>
+      </div>
+      <div class="basis">你关注的第 ${n.seg} 段在 <b>v${n.fromVersionId} → v${n.toVersionId}</b> 的发布中正文有净变化。</div>
+      <div class="card-actions">
+        <button class="btn small primary" data-notif-diff="${n.id}">查看净变化对照</button>
+        ${n.read ? '<span class="muted">已读</span>' : `<button class="btn small" data-notif-read="${n.id}">标为已读</button>`}
+      </div>
+    </div>`).join('');
+  $$('#panel-notifications [data-notif-read]').forEach((b) =>
+    b.addEventListener('click', async () => markNotifRead(parseInt(b.dataset.notifRead, 10))));
+  $$('#panel-notifications [data-notif-diff]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      const n = list.find((x) => x.id === parseInt(b.dataset.notifDiff, 10));
+      if (n) openNotificationDiff(n);
+    }));
+}
+
+async function markNotifRead(id) {
+  try {
+    await api(`/api/notifications/${id}/read`, { method: 'POST' });
+    const item = (notifs.notifications || []).find((x) => x.id === id);
+    if (item) item.read = true;
+    notifs.unreadCount = Math.max(0, (notifs.unreadCount || 1) - 1);
+    renderNotifications();
+    renderTabs();
+  } catch (err) {
+    toast(err.message, 'error');
+    if (err.status === 401) showLogin();
+  }
+}
+
+// 从通知直接打开两端版本的净变化对照（只读；保密段按现有权限返回占位）
+async function openNotificationDiff(n) {
+  try {
+    const data = await api(`/api/diff?from=${n.fromVersionId}&to=${n.toVersionId}`);
+    showDiffModal(data);
+  } catch (err) { toast(err.message, 'error'); }
 }
 
 // ---------- 侧栏：版本 ----------

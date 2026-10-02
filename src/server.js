@@ -141,6 +141,31 @@ app.get('/api/secret-logs', requireRole('reviewer'), wrap((_req, res) => {
   res.json({ logs: store.listSecretLogs(db) });
 }));
 
+// ---------- 段关注（任一登录用户，按已导入逐字稿的段号） ----------
+// 关注/取消关注均幂等：重复关注/取消未关注段返回当前状态；关注只影响之后的成功发布。
+// 无文档 409、无效段号 400、未知段号 404；未登录由 requireAuth 拒绝（401）。
+app.post('/api/segments/:seg/follow', requireAuth, wrap((req, res) => {
+  const result = store.setSegmentFollow(db, req.user, parseInt(req.params.seg, 10), true);
+  res.status(201).json({ ok: true, ...result });
+}));
+
+app.post('/api/segments/:seg/unfollow', requireAuth, wrap((req, res) => {
+  const result = store.setSegmentFollow(db, req.user, parseInt(req.params.seg, 10), false);
+  res.json({ ok: true, ...result });
+}));
+
+// ---------- 段关注通知（仅本人）：按发布时间倒序，可逐条标为已读 ----------
+// 参与者当前保密段的通知整体隐藏且不计未读，解除保密后恢复原已读状态；工作人员按现有权限查看。
+app.get('/api/notifications', requireAuth, wrap((req, res) => {
+  res.json(store.listNotifications(db, req.user));
+}));
+
+// 标为已读：仅本人；操作他人通知 403，通知不存在（含对参与者隐藏的保密段通知）404；重复标记幂等。
+app.post('/api/notifications/:id/read', requireAuth, wrap((req, res) => {
+  const result = store.markNotificationRead(db, req.user, parseInt(req.params.id, 10));
+  res.json({ ok: true, ...result });
+}));
+
 // ---------- 不可变版本视图 ----------
 app.get('/api/versions/:id', requireAuth, wrap((req, res) => {
   res.json(store.versionView(db, parseInt(req.params.id, 10), req.user));

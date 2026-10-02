@@ -189,6 +189,32 @@ function initSchema(db) {
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_secret_logs_seg ON secret_logs(seg, id);
+
+  -- 段关注：登录用户按段号关注已导入逐字稿；关注只影响“之后”的成功发布，不补发历史通知
+  CREATE TABLE IF NOT EXISTS segment_follows (
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    seg        INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, seg)
+  );
+
+  -- 关注段发布通知：成功发布时，若关注段从上一已发布版本到新版本“正文有净变化”，
+  -- 为每位关注者写入一条（含段号与两端版本号）。UNIQUE 兜底“同版同段每人至多一条”——
+  -- 即使发布了提议，只要合版后该段正文未变就不写入。仅在发布事务内写入，发布失败整体回滚。
+  -- 取消关注不删除既有通知；参与者当前保密段的通知在视图层整体隐藏、不计未读，解除保密后恢复。
+  CREATE TABLE IF NOT EXISTS segment_notifications (
+    id              INTEGER PRIMARY KEY,
+    user_id         INTEGER NOT NULL REFERENCES users(id),
+    seg             INTEGER NOT NULL,
+    from_version_id INTEGER NOT NULL REFERENCES versions(id),
+    to_version_id   INTEGER NOT NULL REFERENCES versions(id),
+    is_read         INTEGER NOT NULL DEFAULT 0,
+    read_at         TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_unique
+    ON segment_notifications(user_id, to_version_id, seg);
+  CREATE INDEX IF NOT EXISTS idx_notif_user ON segment_notifications(user_id, is_read);
   `);
 
   // 既有数据库的轻量迁移：补充续提所需列，并按冲突原因文本回填类别

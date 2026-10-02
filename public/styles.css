@@ -614,3 +614,22 @@ body {
 .diff-old { background: #fdf3f1; }
 .diff-new { background: #f6faef; }
 .diff-contrib { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* ---------- 段关注与通知 ---------- */
+.follow-toggle {
+  margin-left: 6px;
+  color: #8a7d2c;
+  border-color: #d8cd8d;
+  background: #fdfbf0;
+}
+.follow-toggle.is-following {
+  color: #fff;
+  background: #b79d3a;
+  border-color: #9a8129;
+}
+.notif-head { margin: 0 0 10px; line-height: 1.7; }
+.notif-card.is-unread {
+  border-left: 3px solid #b79d3a;
+  background: #fdfbf0;
+}
+.notif-card .card-actions { margin-top: 8px; }

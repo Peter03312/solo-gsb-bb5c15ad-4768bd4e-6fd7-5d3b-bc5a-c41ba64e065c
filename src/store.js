@@ -125,6 +125,114 @@ function listSecretLogs(db) {
     .all();
 }
 
+// ---------- 段关注与发布通知 ----------
+// 登录用户可按段号关注/取消关注“已导入逐字稿”的段落。关注只影响之后的成功发布，不补发历史通知。
+function followedSegsFor(db, userId) {
+  return new Set(
+    db.prepare('SELECT seg FROM segment_follows WHERE user_id=?').all(userId).map((r) => r.seg)
+  );
+}
+
+// 关注/取消关注均为幂等：重复关注不重复建立、取消未关注的段也不报错（非法段号/无文档仍明确拒绝）。
+function setSegmentFollow(db, actor, seg, follow) {
+  if (!getDoc(db)) throw conflict('尚未导入逐字稿，无段号可关注', 'NO_DOCUMENT');
+  if (!Number.isInteger(seg)) throw badRequest('缺少有效的段号 seg');
+  const cur = latestVersion(db);
+  if (segIndex(segmentsOf(cur), seg) === -1) {
+    throw notFound(`未知段号：当前版本 v${cur.id} 中不存在第 ${seg} 段，无法关注或取消关注`);
+  }
+  return db.transaction(() => {
+    if (follow) {
+      db.prepare('INSERT OR IGNORE INTO segment_follows (user_id, seg) VALUES (?,?)').run(actor.id, seg);
+    } else {
+      db.prepare('DELETE FROM segment_follows WHERE user_id=? AND seg=?').run(actor.id, seg);
+    }
+    return { seg, following: follow };
+  })();
+}
+
+// 发布事务内调用：为“发布时仍关注该段”的用户生成通知。
+// 口径：仅当该段从 fromVersion 到 newVersion 的最终正文存在净变化（逐码点不等）时通知；
+// 即使发布了提议，只要合版后该段正文未变（如把文字替换成相同文字）就不通知。
+// 同版同段每人至多一条：UNIQUE(user,to_version_id,seg) 兜底；本函数整体在发布事务中，失败随发布回滚。
+function emitFollowNotifications(db, oldSegments, newSegments, fromVersionId, toVersionId) {
+  const changedSegs = [];
+  for (const s of newSegments) {
+    const idx = segIndex(oldSegments, s.seg);
+    if (idx === -1 || oldSegments[idx].text !== s.text) changedSegs.push(s.seg);
+  }
+  if (!changedSegs.length) return 0;
+  const ins = db.prepare(
+    `INSERT OR IGNORE INTO segment_notifications
+       (user_id, seg, from_version_id, to_version_id, is_read)
+     VALUES (?,?,?,?,0)`
+  );
+  let created = 0;
+  for (const seg of changedSegs) {
+    const followers = db.prepare('SELECT user_id FROM segment_follows WHERE seg=?').all(seg);
+    for (const f of followers) {
+      const r = ins.run(f.user_id, seg, fromVersionId, toVersionId);
+      created += r.changes;
+    }
+  }
+  return created;
+}
+
+// 通知视图：只返回本人的通知，按发布时间（新版本号）倒序，同发布按段号、通知 id 倒序。
+// 参与者对“当前保密段”的通知整体隐藏——不返回、不计入未读数；解除保密后恢复原已读状态（行未被改动）。
+// 工作人员（记录员/复核员）按现有权限看到本人全部通知（保密不影响工作人员）。
+function listNotifications(db, viewer) {
+  if (!getDoc(db)) return { notifications: [], unreadCount: 0 };
+  const secrets = secretSegs(db);
+  const rows = db
+    .prepare(
+      `SELECT n.id, n.seg, n.from_version_id, n.to_version_id, n.is_read, n.read_at, n.created_at
+       FROM segment_notifications n
+       WHERE n.user_id = ?
+       ORDER BY n.to_version_id DESC, n.seg DESC, n.id DESC`
+    )
+    .all(viewer.id);
+  const notifications = [];
+  let unreadCount = 0;
+  for (const n of rows) {
+    if (!isStaff(viewer) && secrets.has(n.seg)) continue; // 当前保密段：整体隐藏
+    const item = {
+      id: n.id,
+      seg: n.seg,
+      fromVersionId: n.from_version_id,
+      toVersionId: n.to_version_id,
+      read: !!n.is_read,
+      readAt: n.read_at || null,
+      createdAt: n.created_at,
+    };
+    notifications.push(item);
+    if (!n.is_read) unreadCount++;
+  }
+  return { notifications, unreadCount };
+}
+
+// 逐条标为已读：仅可操作本人通知；操作他人通知明确 403 拒绝；通知不存在 404；
+// 参与者当前保密段的通知已整体隐藏，按不存在处理（解除保密后恢复原已读状态）；
+// 重复标记不改变结果（幂等，read_at 保留首次标记时间）。
+function markNotificationRead(db, actor, id) {
+  if (!Number.isInteger(id)) throw badRequest('缺少有效的通知 id');
+  const n = db.prepare('SELECT * FROM segment_notifications WHERE id=?').get(id);
+  if (!n) throw notFound(`通知 #${id} 不存在`);
+  if (n.user_id !== actor.id) {
+    throw forbidden('无权操作：不能将他人的通知标为已读，只能操作自己的通知');
+  }
+  if (!isStaff(actor) && isSecretSeg(db, n.seg)) {
+    // 保密期间对参与者不可见、不可操作；通知与已读状态均保留，解除保密后恢复
+    throw notFound(`通知 #${id} 不存在`);
+  }
+  if (!n.is_read) {
+    db.prepare(
+      `UPDATE segment_notifications SET is_read=1, read_at=datetime('now') WHERE id=? AND is_read=0`
+    ).run(id);
+  }
+  return { id, read: true };
+}
+
 // ---------- 提议依据附件 ----------
 function attachmentRow(db, id) {
   return db
@@ -648,6 +756,10 @@ function publish(db, actor, note) {
     const watermark = db.prepare('SELECT COALESCE(MAX(id),0) AS m FROM decisions').get().m;
     db.prepare('UPDATE versions SET decision_watermark=? WHERE id=?').run(watermark, newId);
 
+    // 6) 段关注通知：仅对本次合版后“正文有净变化”的关注段，为发布时仍关注的用户各生成一条；
+    //    合版后未变的段（即使发布了提议，如替换成相同文字）不通知。与发布同一事务，失败不留通知。
+    emitFollowNotifications(db, segments, newSegments, cur.id, newId);
+
     return newId;
   })();
 }
@@ -1093,6 +1205,7 @@ function boothView(db, viewer) {
     },
     segments,
     secretSegs: [...secrets].sort((a, b) => a - b),
+    followedSegs: [...followedSegsFor(db, viewer.id)].sort((a, b) => a - b),
     stage: stage
       .filter((p) => staff || !secrets.has(p.seg))
       .map((p) => ({ id: p.id, seg: p.seg, start: p.start_cp, end: p.end_cp, replacement: p.replacement })),
@@ -1410,6 +1523,11 @@ module.exports = {
   previewSegments,
   setSegmentSecret,
   listSecretLogs,
+  setSegmentFollow,
+  followedSegsFor,
+  listNotifications,
+  markNotificationRead,
+  emitFollowNotifications,
   secretSegs,
   SECRET_PLACEHOLDER,
   getDoc,
